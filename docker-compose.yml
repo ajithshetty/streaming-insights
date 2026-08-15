@@ -1,0 +1,106 @@
+version: "3.8"
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.1.9
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: streamdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d streamdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  producer:
+    build: ./producer
+    container_name: producer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      EVENTS_TOPIC: user-events
+      EVENTS_PER_SECOND: "8"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: unless-stopped
+
+  flink-job:
+    build: ./flink-job
+    container_name: flink-job
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      EVENTS_TOPIC: user-events
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: streamdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      WINDOW_SECONDS: "30"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    build: ./api
+    container_name: api
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-5}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: streamdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      CONTEXT_WINDOW_MINUTES: "15"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    container_name: frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  pgdata:
